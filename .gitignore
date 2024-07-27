@@ -1,0 +1,17 @@
+# MacOS
+.DS_Store
+
+# Windows thumbnail cache files
+Thumbs.db
+
+# Windows Folder config file
+[Dd]esktop.ini
+
+# Windows Recycle Bin used on file shares
+$RECYCLE.BIN/
+
+# Logs
+logs
+*.log
+
+debug/
