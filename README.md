@@ -42,6 +42,9 @@ sudo cp zigbeed /usr/local/bin/
 sudo cp zigbeed.conf /usr/local/etc/
 ```
 
+> [!TIP]
+> To connect to zigbeed from your ZigBee application, use the path configured in `/etc/systemd/system/zigbeed-socat.service`. Default is: `/dev/ttyZigbeeNCP`.
+
 ## Install OTBR
 
 NOT YET SUPPORTED
