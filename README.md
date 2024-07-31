@@ -147,7 +147,8 @@ Then you can use `127.0.0.1:9627` in your ZigBee application (in whatever IP/por
 
 ## OTBR
 
-> [!WARNING] OTBR setup is very intricate, and might require manual editing of the scripts used to install all the requirements if your setup varies slightly. Beware, it also modifies several parts of the system to allow it to work (networking & co).
+> [!WARNING]
+> OTBR setup is very intricate, and might require manual editing of the scripts used to install all the requirements if your setup varies slightly. Beware, it also modifies several parts of the system to allow it to work (networking & co).
 
 Add OpenThread support.
 
