@@ -24,9 +24,11 @@ jobs:
           rebuild=$(< ./rebuild)
           simplicity_sdk_tag=$(< ./simplicity_sdk_tag)
           cpcd_tag=$(< ./cpcd_tag)
+          thread_version=$(< ./thread_version)
           echo "rebuild=$rebuild" >> $GITHUB_OUTPUT
           echo "simplicity_sdk_tag=$simplicity_sdk_tag" >> $GITHUB_OUTPUT
           echo "cpcd_tag=$cpcd_tag" >> $GITHUB_OUTPUT
+          echo "thread_version=$thread_version" >> $GITHUB_OUTPUT
           echo "tag=v$package_version" >> $GITHUB_OUTPUT
 
           if [ -n "$exists" ];
@@ -57,45 +59,63 @@ jobs:
       rebuild: ${{ steps.version-check.outputs.rebuild }}
       simplicity_sdk_tag: ${{ steps.version-check.outputs.simplicity_sdk_tag }}
       cpcd_tag: ${{ steps.version-check.outputs.cpcd_tag }}
+      thread_version: ${{ steps.version-check.outputs.thread_version }}
 
   build-from-arch-containers:
     # The host should always be Linux
-    runs-on: ubuntu-latest
+    # ubuntu-latest is still ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: [create-release]
-    if: ${{ needs.create-release.outputs.skipped == 'false' || needs.create-release.outputs.rebuild == 'true' }}
+    # non-empty rebuild array means need further check (can't use matrix from `if`)
+    if: ${{ needs.create-release.outputs.skipped == 'false' || needs.create-release.outputs.rebuild != '[]' }}
     permissions:
       contents: write
       packages: write
-    name: Build for ${{ matrix.zigbee }}
+    name: Build ${{ matrix.zigbee }}-${{ matrix.distro != 'none' && matrix.distro || matrix.base_image_name }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - arch: armv7
-            distro: bookworm
+            distro: ubuntu_latest
             # below are used by slc and to match artifact names
             zigbee: arm32
             linux_arch: 32
           - arch: aarch64
-            distro: bookworm
+            distro: ubuntu_latest
             # below are used by slc and to match artifact names
             zigbee: arm64
             linux_arch: 64
           - arch: none
             distro: none
-            base_image: debian:bookworm
+            base_image: ubuntu:latest
+            base_image_name: ubuntu_latest
             # below are used by slc and to match artifact names
             zigbee: x86_64
             linux_arch: 64
+          # - arch: none
+          #   distro: none
+          #   base_image: debian:bookworm
+          #   base_image_name: debian_bookworm
+          #   # below are used by slc and to match artifact names
+          #   zigbee: x86_64
+          #   linux_arch: 64
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check if should rebuild
+        id: check-rebuild
+        run: |
+          echo "rebuild=${{ contains(fromJson(needs.create-release.outputs.rebuild), matrix.zigbee) }}" >> $GITHUB_OUTPUT
+
       - name: Warn rebuild
-        if: ${{ needs.create-release.outputs.skipped == 'true' && needs.create-release.outputs.rebuild == 'true' }}
+        if: ${{ needs.create-release.outputs.skipped == 'true' && steps.check-rebuild.outputs.rebuild == 'true' }}
         run: |
           echo "::warning file=rebuild,line=1::Rebuild flag is set, overwriting existing release (${{ needs.create-release.outputs.tag }}) artifacts for ${{ matrix.zigbee }}."
 
-      - uses: uraimo/run-on-arch-action@v2
-        name: Build artifacts
+      - name: Build artifacts
+        uses: uraimo/run-on-arch-action@v2
+        if: ${{ needs.create-release.outputs.skipped == 'false' || steps.check-rebuild.outputs.rebuild == 'true' }}
         id: build
         with:
           arch: ${{ matrix.arch }}
@@ -107,6 +127,7 @@ jobs:
 
           # Warning: Have to `sudo` in here
           setup: |
+            export DEBIAN_FRONTEND=noninteractive
             sudo apt-get update
             sudo apt-get install -q -y git git-lfs curl bzip2 unzip xz-utils build-essential make g++ gcc cmake openjdk-21-jre-headless
             sudo rm -rf /var/lib/apt/lists/*
@@ -118,8 +139,14 @@ jobs:
             mkdir -p "${PWD}/artifacts/outputs/systemd"
             mkdir -p "${PWD}/artifacts/outputs/cpcd"
             mkdir -p "${PWD}/artifacts/outputs/zigbeed"
-            mkdir -p "${PWD}/artifacts/outputs/otbr"
+            mkdir -p "${PWD}/artifacts/outputs/otbr/web/frontend/res"
+            mkdir -p "${PWD}/artifacts/outputs/otbr/web/frontend/third-party"
+            mkdir -p "${PWD}/artifacts/outputs/ot-cli"
             mkdir -p "${PWD}/artifacts/outputs/ble"
+
+            # copy all bash scripts from repo checkout
+            sudo chmod a+x ./*.sh
+            cp ./*.sh "${PWD}/artifacts/outputs/"
 
             echo "Storing artifacts in ${PWD}/artifacts/"
 
@@ -135,6 +162,13 @@ jobs:
             slc_cli/slc signature trust
             slc_cli/slc generate --with=zigbee_${{ matrix.zigbee }},linux_arch_${{ matrix.linux_arch }} --without=zigbee_recommended_linux_arch -p=./simplicity_sdk/protocol/zigbee/app/zigbeed/zigbeed.slcp -d=$PWD/artifacts/zigbeed_slcp
 
+            # sdk required to build some arch components
+            ln -s $PWD/simplicity_sdk $PWD/artifacts/simplicity_sdk
+
+            # allow testing on debian
+            sed -i -e 's+ = "Ubuntu"+ = "Ubuntu" || "$PLATFORM" = "Debian"+g' $PWD/artifacts/simplicity_sdk/util/third_party/openthread/script/bootstrap
+            sed -i -e "s+without NAT64 || without DNS64+# without NAT64 || without DNS64+g" $PWD/artifacts/simplicity_sdk/util/third_party/ot-br-posix/script/_dns64
+
             cp simplicity_sdk/app/multiprotocol/containers/multiprotocol-container/_artifacts/etc/zigbeed.conf $PWD/artifacts/outputs/zigbeed/
 
             echo "Copied zigbeed.conf to ${PWD}/artifacts/outputs/zigbeed/"
@@ -148,7 +182,8 @@ jobs:
             --volume "${PWD}/artifacts:/artifacts"
 
           # Pass some environment variables to the container
-          # env: | # YAML, but pipe character is necessary
+          env: | # YAML, but pipe character is necessary
+            DEBIAN_FRONTEND: noninteractive
 
           # The shell to run commands with in the container
           shell: /bin/sh
@@ -157,8 +192,12 @@ jobs:
           # This speeds up builds if you are also using githubToken.
           # Any dependencies installed here will be part of the container image that gets cached, so subsequent builds don't have to re-install them.
           install: |
+            export DEBIAN_FRONTEND=noninteractive
             apt-get update
-            apt-get install --no-install-recommends -q -y tar git git-lfs ca-certificates curl bzip2 unzip xz-utils build-essential make g++ gcc cmake libmbedtls-dev
+            apt-get install --no-install-recommends -q -y tar git git-lfs ca-certificates curl bzip2 unzip xz-utils build-essential make g++ gcc cmake libmbedtls-dev pkg-config lsb-release sudo debconf-utils apt-utils ninja-build nodejs npm
+            echo resolvconf resolvconf/linkify-resolvconf boolean false | debconf-set-selections
+            echo debconf debconf/frontend select Noninteractive | debconf-set-selections
+            apt-get install --no-install-recommends -q -y resolvconf
             rm -rf /var/lib/apt/lists/*
 
           # Produce artifacts and place them in the mounted volume
@@ -170,6 +209,9 @@ jobs:
 
             cd /
 
+            # Build cpcd first, it's used by most of the rest
+            echo "Building cpcd..."
+
             git clone --depth 1 -b ${{ needs.create-release.outputs.cpcd_tag }} https://github.com/SiliconLabs/cpc-daemon.git
             mkdir cpc-daemon/build
             cd cpc-daemon/build
@@ -178,62 +220,136 @@ jobs:
             make install
             ldconfig
 
+            echo "Done building cpcd."
+
             cp /cpc-daemon/build/cmake_install.cmake /artifacts/outputs/cpcd/
-            cp /cpc-daemon/build/cmake_install.cmake /artifacts/outputs/cpcd/cmake_install.cmake.bak
             cp /cpc-daemon/build/cpcd  /artifacts/outputs/cpcd/
             cp /cpc-daemon/build/libcpc*  /artifacts/outputs/cpcd/
             cp /cpc-daemon/lib/sl_cpc.h  /artifacts/outputs/cpcd/
             cp /cpc-daemon/cpcd.conf  /artifacts/outputs/cpcd/
 
-            sed -i -e "s+uart_device_baud: 115200+uart_device_baud: 460800+g" /artifacts/outputs/cpcd/cpcd.conf
-            sed -i -e "s+disable_encryption: false+disable_encryption: true+g" /artifacts/outputs/cpcd/cpcd.conf
-
-            # must be in root of cpc-daemon before sed on cmake file
-            cd /cpc-daemon
-
-            # KEEP /cpc-daemon/build:
-            # REPL /cpc-daemon/build/libcpc.so.4.5.1.0
-            # REPL /cpc-daemon/build/libcpc.so.3
-            # REPL /cpc-daemon/build/libcpc.so
-            # REPL /cpc-daemon/build/libcpc.pc
-            # REPL /cpc-daemon/build/cpcd
-            # REPL /cpc-daemon/build/${CMAKE_INSTALL_MANIFEST}
-            # REPL /cpc-daemon/./lib/sl_cpc.h
-            # REPL /cpc-daemon/./cpcd.conf
-            sed -i -e "s+$PWD/build/+./+g" /artifacts/outputs/cpcd/cmake_install.cmake
-            sed -i -e "s+$PWD/./lib+.+g" /artifacts/outputs/cpcd/cmake_install.cmake
-            sed -i -e "s+$PWD/./+./+g" /artifacts/outputs/cpcd/cmake_install.cmake
-
-            echo "Copied cpcd install files to /artifacts/outputs/cpcd/"
+            echo "Outputs from cpcd added to artifacts."
+            echo "Building zigbeed..."
 
             cd /artifacts/zigbeed_slcp
             make -f zigbeed.Makefile
 
-            cp /artifacts/zigbeed_slcp/build/debug/zigbeed /artifacts/outputs/zigbeed/
-            chmod +x /artifacts/outputs/zigbeed/zigbeed
+            echo "Done building zigbeed."
 
-            echo "Copied zigbeed binary to /artifacts/outputs/zigbeed/"
+            # DEBUG: tar -J -c -v -v -f /artifacts/outputs/zigbeed.tar.xz -C /artifacts/zigbeed_slcp/build/ .
+            cp /artifacts/zigbeed_slcp/build/debug/zigbeed /artifacts/outputs/zigbeed/
+
+            echo "Outputs from zigbeed added to artifacts."
+
+            ln -s /artifacts/simplicity_sdk/util/third_party/openthread /artifacts/simplicity_sdk/util/third_party/ot-br-posix/third_party/openthread/repo
+            ln -s /cpc-daemon /artifacts/simplicity_sdk/platform/service/cpc/daemon
+            # Copy the config file to a known include path
+            cp /artifacts/simplicity_sdk/protocol/openthread/platform-abstraction/posix/openthread-core-silabs-posix-config.h /artifacts/simplicity_sdk/util/third_party/openthread/src/posix/platform/
+
+            echo "Building otbr-agent - ${{ needs.create-release.outputs.thread_version }} certified CPC OTBR..."
+
+            cd /artifacts/simplicity_sdk/util/third_party/ot-br-posix/
+            RELEASE=1 REFERENCE_DEVICE=1 BACKBONE_ROUTER=1 NAT64=1 DNS64=1 ./script/bootstrap
+            # INFRA_IF_NAME=eth0 RELEASE=1 REFERENCE_DEVICE=1 BACKBONE_ROUTER=1 BORDER_ROUTING=1 NAT64=1 DNS64=1 OTBR_OPTIONS="-DOT_THREAD_VERSION=${{ needs.create-release.outputs.thread_version }} -DOT_MULTIPAN_RCP=ON -DCPCD_SOURCE_DIR=/artifacts/simplicity_sdk/platform/service/cpc/daemon -DOT_POSIX_RCP_HDLC_BUS=ON -DOT_POSIX_RCP_SPI_BUS=ON -DOT_POSIX_RCP_VENDOR_BUS=ON -DOT_POSIX_CONFIG_RCP_VENDOR_DEPS_PACKAGE=/artifacts/simplicity_sdk/protocol/openthread/platform-abstraction/posix/posix_vendor_rcp.cmake -DOT_POSIX_CONFIG_RCP_VENDOR_INTERFACE=/artifacts/simplicity_sdk/protocol/openthread/platform-abstraction/posix/cpc_interface.cpp -DOT_CLI_VENDOR_EXTENSION=/artifacts/simplicity_sdk/protocol/openthread/platform-abstraction/posix/posix_vendor_cli.cmake -DOT_PLATFORM_CONFIG=openthread-core-silabs-posix-config.h -DOTBR_DUA_ROUTING=ON -DOTBR_DNSSD_DISCOVERY_PROXY=ON -DOTBR_SRP_ADVERTISING_PROXY=ON" ./script/setup
+            # hook directly for build (should be same as above, without uninstall/install)
+            ./script/cmake-build -DBUILD_TESTING=OFF -DCMAKE_INSTALL_PREFIX=/usr -DOTBR_DBUS=ON -DOTBR_INFRA_IF_NAME=eth0 -DOTBR_MDNS=mDNSResponder -DOTBR_VERSION= -DOT_PACKAGE_VERSION= -DOTBR_WEB=ON -DOTBR_BORDER_ROUTING=ON -DOTBR_REST=ON -DOTBR_BACKBONE_ROUTER=ON -DOTBR_NO_AUTO_ATTACH=1 -DOT_REFERENCE_DEVICE=ON -DOT_DHCP6_CLIENT=ON -DOT_DHCP6_SERVER=ON -DOTBR_NAT64=ON -DOT_POSIX_NAT64_CIDR=192.168.255.0/24 -DOTBR_DNS_UPSTREAM_QUERY=ON -DOT_FIREWALL=OFF -DOT_THREAD_VERSION=${{ needs.create-release.outputs.thread_version }} -DOT_MULTIPAN_RCP=ON -DCPCD_SOURCE_DIR=/artifacts/simplicity_sdk/platform/service/cpc/daemon -DOT_POSIX_RCP_HDLC_BUS=ON -DOT_POSIX_RCP_SPI_BUS=ON -DOT_POSIX_RCP_VENDOR_BUS=ON -DOT_POSIX_CONFIG_RCP_VENDOR_DEPS_PACKAGE=/artifacts/simplicity_sdk/protocol/openthread/platform-abstraction/posix/posix_vendor_rcp.cmake -DOT_POSIX_CONFIG_RCP_VENDOR_INTERFACE=/artifacts/simplicity_sdk/protocol/openthread/platform-abstraction/posix/cpc_interface.cpp -DOT_CLI_VENDOR_EXTENSION=/artifacts/simplicity_sdk/protocol/openthread/platform-abstraction/posix/posix_vendor_cli.cmake -DOT_PLATFORM_CONFIG=openthread-core-silabs-posix-config.h -DOTBR_DUA_ROUTING=ON -DOTBR_DNSSD_DISCOVERY_PROXY=ON -DOTBR_SRP_ADVERTISING_PROXY=ON -DOTBR_VENDOR_NAME="Nerivec" -DOTBR_PRODUCT_NAME="silabs-multiprotocol-builder"
+            cd /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/otbr/
+            ninja
+            ninja install
+
+            echo "Done building otbr-agent."
+
+            # DEBUG: tar -J -c -v -v -f /artifacts/outputs/otbr-agent.tar.xz -C /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/ .
+            # bring in the dir itself (platform default envs)
+            cp -R /artifacts/simplicity_sdk/util/third_party/ot-br-posix/examples/platforms /artifacts/outputs/otbr/
+            # bring in the dir itself (patches)
+            cp -R /artifacts/simplicity_sdk/util/third_party/ot-br-posix/third_party/mDNSResponder /artifacts/outputs/otbr/
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/etc/docker/docker_entrypoint.sh /artifacts/outputs/otbr/otbr_entrypoint.sh
+            # bring in the dir itself (bash setup scripts)
+            cp -R /artifacts/simplicity_sdk/util/third_party/ot-br-posix/script /artifacts/outputs/otbr/
+
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/otbr/src/agent/cmake_install.cmake /artifacts/outputs/otbr/
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/otbr/src/agent/otbr-agent /artifacts/outputs/otbr/
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/otbr/third_party/openthread/repo/src/posix/ot-ctl /artifacts/outputs/otbr/
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/otbr/src/agent/otbr-agent.conf /artifacts/outputs/otbr/
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/otbr/src/agent/otbr-agent.service /artifacts/outputs/otbr/
+            # content gets overridden by docker_entrypoint.sh
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/otbr/src/agent/otbr-agent.default /artifacts/outputs/otbr/
+
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/otbr/src/web/cmake_install.cmake /artifacts/outputs/otbr/web/
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/otbr/src/web/otbr-web /artifacts/outputs/otbr/web/
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/otbr/src/web/otbr-web.service /artifacts/outputs/otbr/web/
+
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/otbr/src/web/web-service/frontend/cmake_install.cmake /artifacts/outputs/otbr/web/frontend/
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/src/web/web-service/frontend/index.html /artifacts/outputs/otbr/web/frontend/
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/src/web/web-service/frontend/join.dialog.html /artifacts/outputs/otbr/web/frontend/
+            # resulting structure: ./img, ./css, ./js
+            cp -R /artifacts/simplicity_sdk/util/third_party/ot-br-posix/src/web/web-service/frontend/res/* /artifacts/outputs/otbr/web/frontend/res/
+
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/otbr/src/web/web-service/frontend/node_modules/angular-animate/angular-animate.min.js /artifacts/outputs/otbr/web/frontend/third-party/
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/otbr/src/web/web-service/frontend/node_modules/angular-aria/angular-aria.min.js /artifacts/outputs/otbr/web/frontend/third-party/
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/otbr/src/web/web-service/frontend/node_modules/angular-material/angular-material.min.js /artifacts/outputs/otbr/web/frontend/third-party/
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/otbr/src/web/web-service/frontend/node_modules/angular-messages/angular-messages.min.js /artifacts/outputs/otbr/web/frontend/third-party/
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/otbr/src/web/web-service/frontend/node_modules/angular/angular.min.js /artifacts/outputs/otbr/web/frontend/third-party/
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/otbr/src/web/web-service/frontend/node_modules/d3/d3.min.js /artifacts/outputs/otbr/web/frontend/third-party/
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/otbr/src/web/web-service/frontend/node_modules/material-design-lite/material.min.js /artifacts/outputs/otbr/web/frontend/third-party/
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/otbr/src/web/web-service/frontend/node_modules/angular-material/angular-material.min.css /artifacts/outputs/otbr/web/frontend/third-party/
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/otbr/src/web/web-service/frontend/node_modules/material-design-lite/material.min.css /artifacts/outputs/otbr/web/frontend/third-party/
+
+            # tools
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/otbr/tools/pskc /artifacts/outputs/otbr/
+            cp /artifacts/simplicity_sdk/util/third_party/ot-br-posix/build/otbr/tools/steering-data /artifacts/outputs/otbr/
+
+            echo "Outputs from otbr-agent added to artifacts."
+            echo "Building ot-cli..."
+
+            cd /artifacts/simplicity_sdk/util/third_party/openthread/
+            ./script/cmake-build posix -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release -DOT_THREAD_VERSION=${{ needs.create-release.outputs.thread_version }} -DOT_MULTIPAN_RCP=ON -DOT_POSIX_RCP_HDLC_BUS=ON -DOT_POSIX_RCP_SPI_BUS=ON -DOT_POSIX_RCP_VENDOR_BUS=ON -DCPCD_SOURCE_DIR=/artifacts/simplicity_sdk/platform/service/cpc/daemon -DOT_POSIX_CONFIG_RCP_VENDOR_INTERFACE=/artifacts/simplicity_sdk/protocol/openthread/platform-abstraction/posix/cpc_interface.cpp -DOT_PLATFORM_CONFIG=openthread-core-silabs-posix-config.h -DOT_POSIX_CONFIG_RCP_VENDOR_DEPS_PACKAGE=/artifacts/simplicity_sdk/protocol/openthread/platform-abstraction/posix/posix_vendor_rcp.cmake
+
+            echo "Done building ot-cli..."
+
+            # DEBUG: tar -J -c -v -v -f /artifacts/outputs/ot-cli.tar.xz -C /artifacts/simplicity_sdk/util/third_party/openthread/build/posix/src/posix/ .
+            cp /artifacts/simplicity_sdk/util/third_party/openthread/build/posix/tools/ot-fct/ot-fct /artifacts/outputs/ot-cli/
+            cp /artifacts/simplicity_sdk/util/third_party/openthread/build/posix/src/posix/ot-cli /artifacts/outputs/ot-cli/
+            cp /artifacts/simplicity_sdk/util/third_party/openthread/build/posix/src/posix/cmake_install.cmake /artifacts/outputs/ot-cli/
+
+            echo "Outputs from ot-cli added to artifacts."
+            echo "Building cpc-hci-bridge..."
+
+            cd /artifacts/simplicity_sdk/app/bluetooth/example_host/bt_host_cpc_hci_bridge/
+            make -f makefile
+
+            echo "Done building cpc-hci-bridge..."
+
+            # DEBUG: tar -J -c -v -v -f /artifacts/outputs/cpc-hci-bridge.tar.xz -C /artifacts/simplicity_sdk/app/bluetooth/example_host/bt_host_cpc_hci_bridge/exe/ .
+            cp /artifacts/simplicity_sdk/app/bluetooth/example_host/bt_host_cpc_hci_bridge/exe/bt_host_cpc_hci_bridge /artifacts/outputs/ble/
+
+            echo "Outputs from cpc-hci-bridge added to artifacts."
+            echo "Finishing build..."
 
             mv /artifacts/outputs/systemd/master.service /artifacts/outputs/systemd/multiprotocol-master.service
             mv /artifacts/outputs/systemd/otbr@.service /artifacts/outputs/systemd/otbr.service
-            sed -i -e "s+iid=%I+iid=2+g" /artifacts/outputs/systemd/otbr.service
 
             echo "System:" > /artifacts/outputs/built_on.txt
             uname -srvmo >> /artifacts/outputs/built_on.txt
             echo "CPU:" >> /artifacts/outputs/built_on.txt
             cat /proc/cpuinfo | grep "model name" >> /artifacts/outputs/built_on.txt
 
+            echo "Container:" >> /artifacts/outputs/built_on.txt
+            echo "${{ matrix.arch }} ${{ matrix.distro }} ${{ matrix.base_image }}" >> /artifacts/outputs/built_on.txt
+
             cd /artifacts/
 
-            tar Jcf silabs-multiprotocol-components-${{ matrix.zigbee }}.tar.xz -C /artifacts/outputs/ .
+            tar -J -c -f silabs-multiprotocol-components-${{ matrix.zigbee }}-${{ matrix.distro != 'none' && matrix.distro || matrix.base_image_name }}.tar.xz -C /artifacts/outputs/ .
 
             echo "Created tarball at /artifacts/"
 
       # Items placed in /artifacts in the container will be in ${PWD}/artifacts on the host.
       - name: Upload tarball to release
         uses: svenstaro/upload-release-action@v2
+        if: ${{ needs.create-release.outputs.skipped == 'false' || steps.check-rebuild.outputs.rebuild == 'true' }}
         with:
-          file: "artifacts/silabs-multiprotocol-components-${{ matrix.zigbee }}.tar.xz"
+          file: "artifacts/silabs-multiprotocol-components-${{ matrix.zigbee }}-${{ matrix.distro != 'none' && matrix.distro || matrix.base_image_name }}.tar.xz"
           # for "rebuild"
           overwrite: true
           tag: ${{ needs.create-release.outputs.tag }}
