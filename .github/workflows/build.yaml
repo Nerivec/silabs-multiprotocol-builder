@@ -71,7 +71,7 @@ jobs:
     permissions:
       contents: write
       packages: write
-    name: Build ${{ matrix.zigbee }}-${{ matrix.distro != 'none' && matrix.distro || matrix.base_image_name }}
+    name: Build ${{ matrix.zigbee }}-${{ matrix.distro }}
     strategy:
       fail-fast: false
       matrix:
@@ -86,20 +86,16 @@ jobs:
             # below are used by slc and to match artifact names
             zigbee: arm64
             linux_arch: 64
-          - arch: none
-            distro: none
-            base_image: ubuntu:latest
-            base_image_name: ubuntu_latest
+          - arch: amd64
+            distro: ubuntu_latest
             # below are used by slc and to match artifact names
             zigbee: x86_64
             linux_arch: 64
-          # - arch: none
-          #   distro: none
-          #   base_image: debian:bookworm
-          #   base_image_name: debian_bookworm
-          #   # below are used by slc and to match artifact names
-          #   zigbee: x86_64
-          #   linux_arch: 64
+          - arch: amd64
+            distro: debian_latest
+            # below are used by slc and to match artifact names
+            zigbee: x86_64
+            linux_arch: 64
     steps:
       - uses: actions/checkout@v4
 
@@ -114,13 +110,12 @@ jobs:
           echo "::warning file=rebuild,line=1::Rebuild flag is set, overwriting existing release (${{ needs.create-release.outputs.tag }}) artifacts for ${{ matrix.zigbee }}."
 
       - name: Build artifacts
-        uses: uraimo/run-on-arch-action@v2
+        uses: Nerivec/run-on-arch-action@de6cb209c2b168174fb8670ada15b57f336c6929
         if: ${{ needs.create-release.outputs.skipped == 'false' || steps.check-rebuild.outputs.rebuild == 'true' }}
         id: build
         with:
           arch: ${{ matrix.arch }}
           distro: ${{ matrix.distro }}
-          base_image: ${{ matrix.base_image }}
 
           # Not required, but speeds up builds
           githubToken: ${{ github.token }}
@@ -194,7 +189,7 @@ jobs:
           install: |
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
-            apt-get install --no-install-recommends -q -y tar git git-lfs ca-certificates curl bzip2 unzip xz-utils build-essential make g++ gcc cmake libmbedtls-dev pkg-config lsb-release sudo debconf-utils apt-utils ninja-build nodejs npm
+            apt-get install --no-install-recommends -q -y systemd tar git git-lfs ca-certificates curl bzip2 unzip xz-utils build-essential make g++ gcc cmake libmbedtls-dev pkg-config lsb-release sudo debconf-utils apt-utils ninja-build nodejs npm
             echo resolvconf resolvconf/linkify-resolvconf boolean false | debconf-set-selections
             echo debconf debconf/frontend select Noninteractive | debconf-set-selections
             apt-get install --no-install-recommends -q -y resolvconf
@@ -336,11 +331,11 @@ jobs:
             cat /proc/cpuinfo | grep "model name" >> /artifacts/outputs/built_on.txt
 
             echo "Container:" >> /artifacts/outputs/built_on.txt
-            echo "${{ matrix.arch }} ${{ matrix.distro }} ${{ matrix.base_image }}" >> /artifacts/outputs/built_on.txt
+            echo "${{ matrix.arch }} ${{ matrix.distro }}" >> /artifacts/outputs/built_on.txt
 
             cd /artifacts/
 
-            tar -J -c -f silabs-multiprotocol-components-${{ matrix.zigbee }}-${{ matrix.distro != 'none' && matrix.distro || matrix.base_image_name }}.tar.xz -C /artifacts/outputs/ .
+            tar -J -c -f silabs-multiprotocol-components-${{ matrix.zigbee }}-${{ matrix.distro }}.tar.xz -C /artifacts/outputs/ .
 
             echo "Created tarball at /artifacts/"
 
@@ -349,7 +344,7 @@ jobs:
         uses: svenstaro/upload-release-action@v2
         if: ${{ needs.create-release.outputs.skipped == 'false' || steps.check-rebuild.outputs.rebuild == 'true' }}
         with:
-          file: "artifacts/silabs-multiprotocol-components-${{ matrix.zigbee }}-${{ matrix.distro != 'none' && matrix.distro || matrix.base_image_name }}.tar.xz"
+          file: "artifacts/silabs-multiprotocol-components-${{ matrix.zigbee }}-${{ matrix.distro }}.tar.xz"
           # for "rebuild"
           overwrite: true
           tag: ${{ needs.create-release.outputs.tag }}
