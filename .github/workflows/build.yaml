@@ -76,22 +76,39 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - arch: armv7
+          - id: 0
+            arch: armv7
             distro: ubuntu_latest
             # below are used by slc and to match artifact names
             zigbee: arm32
             linux_arch: 32
-          - arch: aarch64
+          - id: 1
+            arch: armv7
+            distro: bookworm
+            # below are used by slc and to match artifact names
+            zigbee: arm32
+            linux_arch: 32
+          - id: 10
+            arch: aarch64
             distro: ubuntu_latest
             # below are used by slc and to match artifact names
             zigbee: arm64
             linux_arch: 64
-          - arch: amd64
+          - id: 11
+            arch: aarch64
+            distro: bookworm
+            # below are used by slc and to match artifact names
+            zigbee: arm64
+            linux_arch: 64
+          - id: 20
+            arch: amd64
             distro: ubuntu_latest
             # below are used by slc and to match artifact names
             zigbee: x86_64
             linux_arch: 64
-          - arch: amd64
+          - id: 21
+            arch: amd64
+            # name from fork
             distro: debian_latest
             # below are used by slc and to match artifact names
             zigbee: x86_64
@@ -102,7 +119,7 @@ jobs:
       - name: Check if should rebuild
         id: check-rebuild
         run: |
-          echo "rebuild=${{ contains(fromJson(needs.create-release.outputs.rebuild), matrix.zigbee) }}" >> $GITHUB_OUTPUT
+          echo "rebuild=${{ contains(fromJson(needs.create-release.outputs.rebuild), matrix.id) }}" >> $GITHUB_OUTPUT
 
       - name: Warn rebuild
         if: ${{ needs.create-release.outputs.skipped == 'true' && steps.check-rebuild.outputs.rebuild == 'true' }}
