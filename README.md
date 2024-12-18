@@ -1,9 +1,9 @@
 # silabs-multiprotocol-builder
 
-Builder for Silabs multiprotocol (Zigbee, OpenThread, Bluetooth Low Energy) components.
+> [!TIP]
+> Silabs will be releasing binaries, same as this project intended, with future releases. _Archiving this for reference._
 
-> [!WARNING]
-> Experimental!
+Builder for Silabs multiprotocol (Zigbee, OpenThread, Bluetooth Low Energy) components.
 
 Uses Silicon Labs Simplicity SDK and Silicon Labs Configurator (slc) to build binaries and configurations files for supported architectures (arm32, arm64, x86_64). It mimics the official Silicon Labs Multiprotocol Docker container to be able to use the components outside of containers.
 
